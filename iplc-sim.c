@@ -194,39 +194,41 @@ void iplc_sim_init(int index, int blocksize, int assoc)
 void iplc_sim_LRU_replace_on_miss(int index, int tag)
 {
     int i = 0;
-    // Moving existing data back to make sure the MRU is accurate
-    for(i = 0; i < cache_assoc - 1; i++) {
+
+    // Our set is ordered least recently used to most.
+    // Delete first entry (LRU) and move existing data back to make sure the MRU is accurate.
+    for (i = 0; i < cache_assoc - 1; i++) {
       cache[index].assoc[i] = cache[index].assoc[i+1];
       cache[index].replace[i] = cache[index].replace[i+1];
     }
 
     // Replace the last index because it is an MRU assoc_entry
     cache[index].assoc[cache_assoc - 1].tag = tag;
-    cache[index].assoc[cache_assoc - 1].validBit = tag;
+    cache[index].assoc[cache_assoc - 1].validBit = 1;
     cache[index].replace[cache_assoc - 1] = 0;
 
     cache_access++;
     cache_miss++;
 }
 
-/*
+/*d
  * iplc_sim_trap_address() determined the entry is in our cache.  Update its
  * information in the cache.
+ *
+ * index determines which set our entry is in
+ * assoc_entry refers to the entry in the set
  */
 void iplc_sim_LRU_update_on_hit(int index, int assoc_entry)
 {
     int i=0, j=0;
-    for (i = 0; i < cache_assoc; i++) {
-      if (cache[index].replace[i] == assoc_entry) {
-        break;
-      }
-    }
+
+    cache_assoc_t temp = cache[index].assoc[assoc_entry];
 
     for (j = i + 1; j < cache_assoc; j++) {
-      cache[index].replace[j-1] = cache[index].replace[j];
+      cache[index].assoc[j-1] = cache[index].assoc[j];
     }
 
-    cache[index].replace[cache_assoc-1] = assoc_entry;
+    cache[index].assoc[cache_assoc-1] = temp;
 
     cache_access++;
     cache_hit++;
@@ -240,7 +242,7 @@ void iplc_sim_LRU_update_on_hit(int index, int assoc_entry)
  */
 int iplc_sim_trap_address(unsigned int address)
 {
-    int i=0, index=0;
+    int index=0;
     int tag=0;
     int hit=0;
     int mask=0;
@@ -249,7 +251,7 @@ int iplc_sim_trap_address(unsigned int address)
     index = address >> cache_blockoffsetbits & mask;
     tag = address >> (cache_index + cache_blockoffsetbits);
 
-    for (i = 0; i < cache_assoc; i++){
+    for (int i = 0; i < cache_assoc; i++){
       if(cache[index].assoc[i].tag == tag){
         hit = 1;
         iplc_sim_LRU_update_on_hit(index, i);
@@ -257,7 +259,17 @@ int iplc_sim_trap_address(unsigned int address)
       }
     }
 
+
+
     if (hit == 0) {
+      for (int i = 0; i < cache_assoc; i++) {
+        // Ideally we want to use an empty block.
+        if(cache[index].assoc[i].tag == 0) {
+          cache[index].assoc[i].tag = tag;
+          iplc_sim_LRU_update_on_hit(index, i);
+          return hit;
+        }
+      }
       iplc_sim_LRU_replace_on_miss(index, tag);
     }
 
@@ -349,7 +361,8 @@ void iplc_sim_push_pipeline_stage()
         // If the address for the next instruction isn't 4 bytes larger,
         // then we know that the branch was taken, otherwise it wasn't taken.
         int branch_taken = 0;
-        if (pipeline[FETCH].instruction_address != pipeline[DECODE].instruction_address + 4)
+        if ((pipeline[FETCH].instruction_address != pipeline[DECODE].instruction_address + 4) &&
+            (pipeline[FETCH].itype != NOP))
           branch_taken = 1;
 
         // If we predicted wrong, add an extra cycle.
