@@ -37,15 +37,16 @@ void iplc_sim_process_pipeline_nop();
 // Outout performance results
 void iplc_sim_finalize();
 
+// Holds the valid bit and tag to be used with the cache_line
 typedef struct cache_associativity
 {
   int validBit;
   int tag;
-} cache_assoc_t;
+} cache_entry_t;
 
 typedef struct cache_line
 {
-    cache_assoc_t *assoc;
+    cache_entry_t *entries;
     int *replace;
 
 } cache_line_t;
@@ -171,11 +172,11 @@ void iplc_sim_init(int index, int blocksize, int assoc)
 
     // Dynamically create our cache based on the information the user entered
     for (i = 0; i < (1<<index); i++) {
-      cache[i].assoc = (cache_assoc_t*) malloc((sizeof(cache_assoc_t) * assoc));
-      cache[i].replace = (int*) malloc((sizeof(int) * assoc));
-      for (j = 0; j < assoc; j++) {
-        cache[i].assoc[j].validBit = 0;
-        cache[i].assoc[j].tag = 0;
+      cache[i].entries = malloc((sizeof(cache_entry_t) * cache_assoc));
+      cache[i].replace = malloc((sizeof(int) * cache_assoc));
+      for (j = 0; j < cache_assoc; j++) {
+        cache[i].entries[j].validBit = 0;
+        cache[i].entries[j].tag = 0;
         cache[i].replace[j] = j;
       }
     }
@@ -193,20 +194,15 @@ void iplc_sim_init(int index, int blocksize, int assoc)
  */
 void iplc_sim_LRU_replace_on_miss(int index, int tag)
 {
-    int i = 0;
-    // Moving existing data back to make sure the MRU is accurate
-    for(i = 0; i < cache_assoc - 1; i++) {
-      cache[index].assoc[i] = cache[index].assoc[i+1];
+    for(int i = 0; i < cache_assoc - 1; i++) {
+      cache[index].entries[i] = cache[index].entries[i+1];
       cache[index].replace[i] = cache[index].replace[i+1];
     }
 
-    // Replace the last index because it is an MRU assoc_entry
-    cache[index].assoc[cache_assoc - 1].tag = tag;
-    cache[index].assoc[cache_assoc - 1].validBit = tag;
+    cache[index].entries[cache_assoc - 1].tag = tag;
+    cache[index].entries[cache_assoc - 1].validBit = 1;
     cache[index].replace[cache_assoc - 1] = 0;
 
-    cache_access++;
-    cache_miss++;
 }
 
 /*
@@ -215,21 +211,20 @@ void iplc_sim_LRU_replace_on_miss(int index, int tag)
  */
 void iplc_sim_LRU_update_on_hit(int index, int assoc_entry)
 {
-    int i=0, j=0;
-    for (i = 0; i < cache_assoc; i++) {
-      if (cache[index].replace[i] == assoc_entry) {
-        break;
-      }
-    }
+    // Find the index to be replaced, tempIndex will hold this value.
+    int tempIndex=0;
 
-    for (j = i + 1; j < cache_assoc; j++) {
+    for (int i = 0; i < cache_assoc; i++) {
+      tempIndex++;
+      if (cache[index].replace[i] == assoc_entry)
+        break;
+    }
+    // Move items in replace array up until it hits the value at tempIndex.
+    // Then move the entry & update cache
+    for (int j = tempIndex + 1; j < cache_assoc; j++) {
       cache[index].replace[j-1] = cache[index].replace[j];
     }
-
     cache[index].replace[cache_assoc-1] = assoc_entry;
-
-    cache_access++;
-    cache_hit++;
 }
 
 /*
@@ -240,26 +235,29 @@ void iplc_sim_LRU_update_on_hit(int index, int assoc_entry)
  */
 int iplc_sim_trap_address(unsigned int address)
 {
-    int i=0, index=0;
-    int tag=0;
     int hit=0;
-    int mask=0;
 
-    index = address >> cache_blockoffsetbits & mask;
-    tag = address >> (cache_index + cache_blockoffsetbits);
-    mask = (1 << cache_index) - 1;
+    int mask = (1 << cache_index) - 1;
+    int index = address >> cache_blockoffsetbits & mask;
+    int tag = address >> (cache_index + cache_blockoffsetbits);
 
-    for (i = 0; i < cache_assoc; i++){
-      if(cache[index].assoc[i].tag == tag){
+    cache_access++;
+
+    for (int i = 0; i < cache_assoc; i++) {
+      if(cache[index].entries[i].tag == tag && cache[index].entries[i].validBit == 1) {
         hit = 1;
         iplc_sim_LRU_update_on_hit(index, i);
+        cache_hit++;
         break;
       }
     }
 
     if (hit == 0) {
       iplc_sim_LRU_replace_on_miss(index, tag);
+      cache_miss++;
     }
+
+    printf("Address %0x: Tag= %0x, Index= %i\n", address, tag, index);
 
     /* expects you to return 1 for hit, 0 for miss */
     return hit;
