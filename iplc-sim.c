@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <math.h>
+#include <limits.h>
 
 #define MAX_CACHE_SIZE 10240
 #define CACHE_MISS_DELAY 10 // 10 cycle cache miss penalty
@@ -42,13 +43,12 @@ typedef struct cache_associativity
 {
   int validBit;
   int tag;
+  int accessed;
 } cache_entry_t;
 
 typedef struct cache_line
 {
     cache_entry_t *entries;
-    int *replace;
-
 } cache_line_t;
 
 cache_line_t *cache=NULL;
@@ -173,11 +173,10 @@ void iplc_sim_init(int index, int blocksize, int assoc)
     // Dynamically create our cache based on the information the user entered
     for (i = 0; i < (1<<index); i++) {
       cache[i].entries = malloc((sizeof(cache_entry_t) * cache_assoc));
-      cache[i].replace = malloc((sizeof(int) * cache_assoc));
       for (j = 0; j < cache_assoc; j++) {
         cache[i].entries[j].validBit = 0;
         cache[i].entries[j].tag = 0;
-        cache[i].replace[j] = j;
+        cache[i].entries[j].accessed = 0;
       }
     }
 
@@ -194,18 +193,25 @@ void iplc_sim_init(int index, int blocksize, int assoc)
  */
 void iplc_sim_LRU_replace_on_miss(int index, int tag)
 {
-    for(int i = 0; i < cache_assoc - 1; i++) {
-      cache[index].entries[i] = cache[index].entries[i+1];
-      cache[index].replace[i] = cache[index].replace[i+1];
-    }
+  int min = INT_MAX;
+  int earliest_entry;
 
-    cache[index].entries[cache_assoc - 1].tag = tag;
-    cache[index].entries[cache_assoc - 1].validBit = 1;
-    cache[index].replace[cache_assoc - 1] = 0;
+  // Find entry that was accessed the longest ago.
+  for (int i = 0; i < cache_assoc; ++i) {
+    if (cache[index].entries[i].accessed < min) {
+      min = cache[index].entries[i].accessed;
+      earliest_entry = i;
+     }
+  }
+
+  // Replace the entry.
+  cache[index].entries[earliest_entry].tag = tag;
+  // Make sure this entry is now the Most Recently Used entry.
+  cache[index].entries[earliest_entry].accessed = cache_access;
 
 }
 
-/*d
+/*
  * iplc_sim_trap_address() determined the entry is in our cache.  Update its
  * information in the cache.
  *
@@ -214,20 +220,7 @@ void iplc_sim_LRU_replace_on_miss(int index, int tag)
  */
 void iplc_sim_LRU_update_on_hit(int index, int assoc_entry)
 {
-    // Find the index to be replaced, tempIndex will hold this value.
-    int tempIndex=0;
-
-    for (int i = 0; i < cache_assoc; i++) {
-      tempIndex++;
-      if (cache[index].replace[i] == assoc_entry)
-        break;
-    }
-    // Move items in replace array up until it hits the value at tempIndex.
-    // Then move the entry & update cache
-    for (int j = tempIndex + 1; j < cache_assoc; j++) {
-      cache[index].replace[j-1] = cache[index].replace[j];
-    }
-    cache[index].replace[cache_assoc-1] = assoc_entry;
+    cache[index].entries[assoc_entry].accessed = cache_access;
 }
 
 /*
@@ -238,6 +231,8 @@ void iplc_sim_LRU_update_on_hit(int index, int assoc_entry)
  */
 int iplc_sim_trap_address(unsigned int address)
 {
+    int found_empty = 0;
+
     int hit=0;
 
     int mask = (1 << cache_index) - 1;
@@ -246,6 +241,7 @@ int iplc_sim_trap_address(unsigned int address)
 
     cache_access++;
 
+    // Check if entry is in our cache.
     for (int i = 0; i < cache_assoc; i++) {
       if(cache[index].entries[i].tag == tag && cache[index].entries[i].validBit == 1) {
         hit = 1;
@@ -255,19 +251,20 @@ int iplc_sim_trap_address(unsigned int address)
       }
     }
 
-
-
+    // Entry wasn't in the cache.
     if (hit == 0) {
+      cache_miss++;
       for (int i = 0; i < cache_assoc; i++) {
-        // Ideally we want to use an empty block.
-        if(cache[index].assoc[i].tag == 0) {
-          cache[index].assoc[i].tag = tag;
+        // Ideally we want to replace an empty block.
+        if(cache[index].entries[i].validBit == 0) {
+          cache[index].entries[i].tag = tag;
+          cache[index].entries[i].validBit = 1;
           iplc_sim_LRU_update_on_hit(index, i);
-          return hit;
+          found_empty = 1;
         }
       }
-      iplc_sim_LRU_replace_on_miss(index, tag);
-      cache_miss++;
+      // Otherwise we need to replace the least recently used block.
+      if (!found_empty) { iplc_sim_LRU_replace_on_miss(index, tag); }
     }
 
     printf("Address %0x: Tag= %0x, Index= %i\n", address, tag, index);
@@ -344,7 +341,6 @@ void iplc_sim_dump_pipeline()
  */
 void iplc_sim_push_pipeline_stage()
 {
-    int i;
     int data_hit=1;
 
     /* 1. Count WRITEBACK stage is "retired" -- This I'm giving you */
@@ -375,11 +371,9 @@ void iplc_sim_push_pipeline_stage()
      *    add delay cycles if needed.
      */
     if (pipeline[MEM].itype == LW) {
-        int inserted_nop = 0;
-
         data_hit = iplc_sim_trap_address( pipeline[MEM].stage.lw.data_address );
         if (!data_hit) {
-          pipeline_cycles += 9;
+          pipeline_cycles += 9; // Would be 10 but we always add a cycle anyway.
           printf("DATA MISS:\t Address 0x%x \n", pipeline[MEM].stage.lw.data_address);
         }
         else {
